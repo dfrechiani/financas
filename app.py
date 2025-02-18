@@ -17,9 +17,25 @@ st.set_page_config(
     layout="wide"
 )
 
-# Configurações das APIs
-whatsapp_api = API(st.secrets["WHATSAPP_TOKEN"])
-openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Debug: Mostrar todos os secrets disponíveis
+st.write("Secrets disponíveis:", st.secrets)
+
+# Tentativa de inicialização com try/except
+try:
+    whatsapp_token = st.secrets["WHATSAPP_TOKEN"]
+    st.write("Token WhatsApp encontrado:", whatsapp_token[:10] + "...")  # Mostra apenas início do token
+    whatsapp_api = API(whatsapp_token)
+except Exception as e:
+    st.error(f"Erro ao inicializar WhatsApp API: {str(e)}")
+    whatsapp_api = None
+
+try:
+    openai_key = st.secrets["OPENAI_API_KEY"]
+    st.write("OpenAI key encontrada:", openai_key[:10] + "...")
+    openai_client = OpenAI(api_key=openai_key)
+except Exception as e:
+    st.error(f"Erro ao inicializar OpenAI: {str(e)}")
+    openai_client = None
 
 # Aplicativo Flask para webhook
 flask_app = Flask(__name__)
