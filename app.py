@@ -367,7 +367,7 @@ Descrição: {resultado['descricao']}"""
 
 # Rotas do Flask para webhook
 @flask_app.route('/webhook', methods=['POST'])
-def webhook():
+def webhook_post():
     data = request.json
     
     try:
@@ -406,7 +406,7 @@ Descrição: {resultado['descricao']}"""
         return 'Erro', 500
 
 @flask_app.route('/webhook', methods=['GET'])
-def verificar():
+def webhook_verify():
     try:
         verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
         mode = request.args.get('hub.mode')
@@ -424,10 +424,12 @@ def verificar():
         st.error(f"Erro na verificação: {str(e)}")
         return str(e), 500
 
-# Iniciar o servidor Flask
 def start_flask():
-    flask_app.run(port=5000)
+    flask_app.run(host='0.0.0.0', port=5000)
 
 if __name__ == "__main__":
     main()
-    Thread(target=start_flask).start()
+    # Iniciar o servidor webhook em uma thread separada
+    flask_thread = Thread(target=start_flask)
+    flask_thread.daemon = True  # Isso garante que a thread será encerrada quando o programa principal terminar
+    flask_thread.start()
