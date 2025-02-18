@@ -365,47 +365,68 @@ Descrição: {resultado['descricao']}"""
         st.error(f"Erro no webhook: {str(e)}")
         return 'Erro', 500
 
-@flask_app.route('/webhook', methods=['GET'])
-def verificar():
+# Rotas do Flask para webhook
+@flask_app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.json
+    
     try:
-        verify_token = ConfigManager.
+        if 'messages' in data and data['messages']:
+            mensagem = data['messages'][0]
+            numero = mensagem['from']
+            texto = mensagem['text']['body']
+            
+            data_manager = DataManager()
+            ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
+            
+            if texto.lower() == 'relatorio':
+                relatorio, _ = ai_assistant.gerar_relatorio_mensal(
+                    data_manager.get_dataframe()
+                )
+                ConfigManager.send_whatsapp_message(numero, relatorio)
+            else:
+                resultado = ai_assistant.processar_mensagem(texto)
+                if resultado['sucesso']:
+                    if data_manager.adicionar_gasto(resultado):
+                        mensagem = f"""✅ Gasto registrado com sucesso!
+                        
+Categoria: {resultado['categoria']}
+Valor: R$ {resultado['valor']:.2f}
+Descrição: {resultado['descricao']}"""
+                    else:
+                        mensagem = "❌ Erro ao salvar o gasto."
+                else:
+                    mensagem = resultado['mensagem']
+                
+                ConfigManager.send_whatsapp_message(numero, mensagem)
+        
+        return 'OK', 200
+    except Exception as e:
+        st.error(f"Erro no webhook: {str(e)}")
+        return 'Erro', 500
 
 @flask_app.route('/webhook', methods=['GET'])
 def verificar():
     try:
         verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
-        if request.args.get('hub.verify_token') == verify_token:
-            return request.args.get('hub.challenge')
-        return 'Token inválido', 403
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
+
+        if mode and token:
+            if mode == 'subscribe' and token == verify_token:
+                return challenge
+            else:
+                return 'Token inválido', 403
+        return 'Parâmetros inválidos', 400
+        
     except Exception as e:
         st.error(f"Erro na verificação: {str(e)}")
-        return 'Erro', 500
+        return str(e), 500
 
-# Inicialização dos componentes
-@st.cache_resource
-def initialize_components():
-    """Inicializa todos os componentes do aplicativo"""
-    data_manager = DataManager()
-    openai_client = ConfigManager.initialize_openai()
-    ai_assistant = AIFinanceAssistant(openai_client)
-    webhook_tester = WebhookTester()
-    return data_manager, ai_assistant, webhook_tester
-
-def render_sidebar(webhook_tester):
-    """Renderiza a barra lateral"""
-    with st.sidebar:
-        st.title("⚙️ Configurações")
-        
-        # Status das APIs
-        st.subheader("Status das APIs")
-        openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
-        whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
-        
-        st.write(f"OpenAI API: {openai_status}")
-        st.write(f"WhatsApp API: {whatsapp_status}")
-        
-        # Teste de Webhook
-        webhook_tester.render_test_interface()
+# Iniciar o servidor Flask
+def start_flask():
+    flask_app.run(port=5000)
 
 def main():
     """Função principal do aplicativo"""
@@ -460,4 +481,5 @@ def main():
 if __name__ == "__main__":
     main()
     # Iniciar o servidor webhook em uma thread separada
-    Thread(target=flask_app.run, kwargs={'port': 5000}).start()
+     Thread(target=start_flask).start()
+
