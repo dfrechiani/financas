@@ -117,6 +117,97 @@ class DataManager:
         except Exception as e:
             st.error(f"Erro ao carregar dados: {str(e)}")
 
+class WhatsAppMessageHandler:
+    def __init__(self, ai_assistant, data_manager):
+        self.ai_assistant = ai_assistant
+        self.data_manager = data_manager
+
+    async def download_file(self, file_id):
+        """Download arquivo do WhatsApp usando a Media API"""
+        try:
+            token = ConfigManager.get_secret("WHATSAPP_TOKEN")
+            url = f"https://graph.facebook.com/v17.0/{file_id}"
+            
+            headers = {
+                "Authorization": f"Bearer {token}",
+            }
+            
+            # Obter URL do arquivo
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                file_data = response.json()
+                # Download do arquivo
+                file_response = requests.get(file_data['url'], headers=headers)
+                return file_response.content
+            return None
+        except Exception as e:
+            st.error(f"Erro ao baixar arquivo: {str(e)}")
+            return None
+
+    async def process_image(self, image_id, number):
+        """Processa imagem usando OCR e GPT-4 Vision"""
+        try:
+            image_content = await self.download_file(image_id)
+            if not image_content:
+                return "Erro ao baixar imagem"
+
+            # Usar GPT-4 Vision para analisar a imagem
+            response = self.ai_assistant.analyze_image(image_content)
+            
+            # Processar os gastos identificados
+            gastos = response.get('gastos', [])
+            for gasto in gastos:
+                self.data_manager.adicionar_gasto(gasto)
+            
+            mensagem = f"✅ Identifiquei {len(gastos)} gastos na imagem:\n\n"
+            for gasto in gastos:
+                mensagem += f"- {gasto['descricao']}: R$ {gasto['valor']:.2f} ({gasto['categoria']})\n"
+            
+            ConfigManager.send_whatsapp_message(number, mensagem)
+            return "Imagem processada com sucesso"
+
+        except Exception as e:
+            return f"Erro ao processar imagem: {str(e)}"
+
+    async def process_document(self, doc_id, number):
+        """Processa documentos (CSV, PDF) do banco"""
+        try:
+            doc_content = await self.download_file(doc_id)
+            if not doc_content:
+                return "Erro ao baixar documento"
+
+            # Identificar tipo do arquivo
+            extension = self.get_file_extension(doc_id)
+            
+            if extension == 'csv':
+                # Processar CSV
+                df = pd.read_csv(io.StringIO(doc_content.decode('utf-8')))
+                gastos = self.ai_assistant.analyze_bank_csv(df)
+            elif extension == 'pdf':
+                # Processar PDF
+                gastos = self.ai_assistant.analyze_bank_pdf(doc_content)
+            else:
+                return "Formato de arquivo não suportado"
+
+            # Adicionar gastos identificados
+            for gasto in gastos:
+                self.data_manager.adicionar_gasto(gasto)
+            
+            mensagem = f"✅ Processado {len(gastos)} transações do arquivo:\n\n"
+            total = sum(gasto['valor'] for gasto in gastos)
+            mensagem += f"Total: R$ {total:.2f}\n\n"
+            mensagem += "Digite 'relatorio' para ver o resumo completo."
+            
+            ConfigManager.send_whatsapp_message(number, mensagem)
+            return "Documento processado com sucesso"
+
+        except Exception as e:
+            return f"Erro ao processar documento: {str(e)}"
+
+    def get_file_extension(self, filename):
+        """Obtém a extensão do arquivo"""
+        return filename.split('.')[-1].lower()
+
 class AIFinanceAssistant:
     def __init__(self, openai_client):
         self.client = openai_client
@@ -318,36 +409,60 @@ def webhook_post():
     
     try:
         if 'messages' in data and data['messages']:
-            mensagem = data['messages'][0]
-            numero = mensagem['from']
-            texto = mensagem['text']['body']
+            message = data['messages'][0]
+            numero = message['from']
             
+            # Inicializar handlers
             data_manager = DataManager()
             ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
+            message_handler = WhatsAppMessageHandler(ai_assistant, data_manager)
             
-            if texto.lower() == 'relatorio':
-                relatorio, _ = ai_assistant.gerar_relatorio_mensal(
-                    data_manager.get_dataframe()
-                )
-                ConfigManager.send_whatsapp_message(numero, relatorio)
-            else:
-                resultado = ai_assistant.processar_mensagem(texto)
-                if resultado['sucesso']:
-                    if data_manager.adicionar_gasto(resultado):
-                        mensagem = f"""✅ Gasto registrado com sucesso!
-                        
+            # Verificar tipo de mensagem
+            if 'type' in message:
+                if message['type'] == 'text':
+                    # Processar mensagem de texto
+                    texto = message['text']['body']
+                    
+                    if texto.lower() == 'relatorio':
+                        relatorio, _ = ai_assistant.gerar_relatorio_mensal(
+                            data_manager.get_dataframe()
+                        )
+                        ConfigManager.send_whatsapp_message(numero, relatorio)
+                    else:
+                        resultado = ai_assistant.processar_mensagem(texto)
+                        if resultado['sucesso']:
+                            if data_manager.adicionar_gasto(resultado):
+                                mensagem = f"""✅ Gasto registrado com sucesso!
+                                
 Categoria: {resultado['categoria']}
 Valor: R$ {resultado['valor']:.2f}
 Descrição: {resultado['descricao']}"""
-                    else:
-                        mensagem = "❌ Erro ao salvar o gasto."
-                else:
-                    mensagem = resultado['mensagem']
+                            else:
+                                mensagem = "❌ Erro ao salvar o gasto."
+                        else:
+                            mensagem = resultado['mensagem']
+                        
+                        ConfigManager.send_whatsapp_message(numero, mensagem)
                 
-                ConfigManager.send_whatsapp_message(numero, mensagem)
+                elif message['type'] == 'image':
+                    # Processar imagem
+                    image_id = message['image']['id']
+                    asyncio.run(message_handler.process_image(image_id, numero))
+                
+                elif message['type'] == 'document':
+                    # Processar documento
+                    doc_id = message['document']['id']
+                    asyncio.run(message_handler.process_document(doc_id, numero))
+                
+                else:
+                    ConfigManager.send_whatsapp_message(
+                        numero, 
+                        "❌ Tipo de mensagem não suportado. Envie texto, imagem ou documento (CSV/PDF)."
+                    )
         
-        return jsonify({"status": "success", "message": "Mensagem processada com sucesso"}), 200
+        return jsonify({"status": "success"}), 200
     except Exception as e:
+        st.error(f"Erro no webhook: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @flask_app.route('/webhook', methods=['GET'])
