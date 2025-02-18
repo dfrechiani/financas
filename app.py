@@ -4,7 +4,7 @@ import plotly.express as px
 from datetime import datetime
 import json
 from pathlib import Path
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from threading import Thread
 import requests
 from openai import OpenAI
@@ -312,7 +312,6 @@ class WebhookTester:
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
 
-# Rotas do Flask para webhook
 @flask_app.route('/webhook', methods=['POST'])
 def webhook_post():
     data = request.json
@@ -347,10 +346,9 @@ Descrição: {resultado['descricao']}"""
                 
                 ConfigManager.send_whatsapp_message(numero, mensagem)
         
-        return 'OK', 200
+        return jsonify({"status": "success", "message": "Mensagem processada com sucesso"}), 200
     except Exception as e:
-        st.error(f"Erro no webhook: {str(e)}")
-        return 'Erro', 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @flask_app.route('/webhook', methods=['GET'])
 def webhook_verify():
@@ -362,14 +360,13 @@ def webhook_verify():
 
         if mode and token:
             if mode == 'subscribe' and token == verify_token:
-                return challenge
+                return challenge, 200
             else:
-                return 'Token inválido', 403
-        return 'Parâmetros inválidos', 400
+                return jsonify({"status": "error", "message": "Token inválido"}), 403
+        return jsonify({"status": "error", "message": "Parâmetros inválidos"}), 400
         
     except Exception as e:
-        st.error(f"Erro na verificação: {str(e)}")
-        return str(e), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # Inicialização dos componentes
 @st.cache_resource
