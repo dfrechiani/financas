@@ -14,33 +14,39 @@ import requests
 st.set_page_config(
     page_title="Assistente Financeiro IA",
     page_icon="💰",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Debug: Mostrar todos os secrets disponíveis
-st.write("Secrets disponíveis:", st.secrets)
-
-# Tentativa de inicialização com try/except
-try:
-    whatsapp_token = st.secrets["WHATSAPP_TOKEN"]
-    st.write("Token WhatsApp encontrado:", whatsapp_token[:10] + "...")  # Mostra apenas início do token
-    whatsapp_api = API(whatsapp_token)
-except Exception as e:
-    st.error(f"Erro ao inicializar WhatsApp API: {str(e)}")
-    whatsapp_api = None
-
-try:
-    openai_key = st.secrets["OPENAI_API_KEY"]
-    st.write("OpenAI key encontrada:", openai_key[:10] + "...")
-    openai_client = OpenAI(api_key=openai_key)
-except Exception as e:
-    st.error(f"Erro ao inicializar OpenAI: {str(e)}")
-    openai_client = None
-
-# Aplicativo Flask para webhook
+# Inicialização do Flask
 flask_app = Flask(__name__)
 
+class ConfigManager:
+    """Gerencia as configurações e secrets do aplicativo"""
+    @staticmethod
+    def get_secret(key: str, default: str = None) -> str:
+        """Recupera um secret de forma segura"""
+        try:
+            return st.secrets.secrets[key]
+        except Exception as e:
+            if default:
+                return default
+            st.error(f"Erro ao acessar {key}: {str(e)}")
+            return None
+
+    @staticmethod
+    def initialize_apis():
+        """Inicializa as APIs necessárias"""
+        whatsapp_token = ConfigManager.get_secret("WHATSAPP_TOKEN")
+        openai_key = ConfigManager.get_secret("OPENAI_API_KEY")
+
+        whatsapp_api = API(whatsapp_token) if whatsapp_token else None
+        openai_client = OpenAI(api_key=openai_key) if openai_key else None
+
+        return whatsapp_api, openai_client
+
 class DataManager:
+    """Gerencia o armazenamento e manipulação dos dados"""
     def __init__(self):
         if 'df' not in st.session_state:
             st.session_state.df = pd.DataFrame(
@@ -48,6 +54,7 @@ class DataManager:
             )
     
     def adicionar_gasto(self, gasto: dict) -> bool:
+        """Adiciona um novo gasto ao DataFrame"""
         try:
             novo_gasto = {
                 'data': datetime.now(),
@@ -69,12 +76,15 @@ class DataManager:
             return False
     
     def get_dataframe(self) -> pd.DataFrame:
+        """Retorna o DataFrame atual"""
         return st.session_state.df
     
     def has_data(self) -> bool:
+        """Verifica se existem dados registrados"""
         return not st.session_state.df.empty
     
     def salvar_dados(self):
+        """Salva os dados em CSV"""
         try:
             Path("data").mkdir(exist_ok=True)
             st.session_state.df.to_csv("data/gastos.csv", index=False)
@@ -82,6 +92,7 @@ class DataManager:
             st.error(f"Erro ao salvar dados: {str(e)}")
     
     def carregar_dados(self):
+        """Carrega dados do CSV se existir"""
         try:
             if Path("data/gastos.csv").exists():
                 df = pd.read_csv("data/gastos.csv")
@@ -91,10 +102,18 @@ class DataManager:
             st.error(f"Erro ao carregar dados: {str(e)}")
 
 class AIFinanceAssistant:
-    def __init__(self):
+    """Assistente de IA para processamento de mensagens e análise financeira"""
+    def __init__(self, openai_client):
         self.client = openai_client
     
     def processar_mensagem(self, mensagem: str) -> dict:
+        """Processa mensagem do usuário usando GPT-4"""
+        if not self.client:
+            return {
+                "sucesso": False,
+                "mensagem": "Cliente OpenAI não inicializado. Verifique as configurações."
+            }
+
         system_prompt = """Você é um assistente financeiro especializado em:
         1. Extrair informações de gastos de mensagens em linguagem natural
         2. Categorizar gastos apropriadamente
@@ -136,8 +155,12 @@ class AIFinanceAssistant:
                 "sucesso": False,
                 "mensagem": f"Erro ao processar mensagem: {str(e)}"
             }
-    
+
     def analisar_padroes(self, df: pd.DataFrame) -> str:
+        """Análise avançada dos padrões de gastos"""
+        if not self.client:
+            return "Cliente OpenAI não inicializado. Verifique as configurações."
+
         if df.empty:
             return "Ainda não há dados suficientes para análise."
 
@@ -174,8 +197,9 @@ class AIFinanceAssistant:
             
         except Exception as e:
             return f"Erro na análise: {str(e)}"
-    
+
     def gerar_relatorio_mensal(self, df: pd.DataFrame):
+        """Gera relatório mensal com visualizações"""
         if df.empty:
             return "Nenhum gasto registrado ainda.", None
         
@@ -210,12 +234,13 @@ class AIFinanceAssistant:
             relatorio += f"- {categoria.title()}: R$ {valor:.2f} ({percentual:.1f}%)\n"
         
         return relatorio, fig
-
 class WebhookTester:
+    """Testa a funcionalidade do webhook"""
     def __init__(self):
-        self.base_url = st.secrets.get('STREAMLIT_URL', 'seu-app-name.streamlit.app')
+        self.base_url = ConfigManager.get_secret('STREAMLIT_URL', 'seu-app-name.streamlit.app')
     
     def render_test_interface(self):
+        """Renderiza a interface de teste do webhook"""
         st.subheader("🔧 Teste do Webhook")
         
         test_message = st.text_input(
@@ -227,22 +252,23 @@ class WebhookTester:
             self.test_webhook(test_message)
     
     def test_webhook(self, message: str):
+        """Executa o teste do webhook"""
         try:
             webhook_url = f"https://{self.base_url}/webhook"
             
             test_data = {
                 "object": "whatsapp_business_account",
                 "entry": [{
-                    "id": "TEST_ID",
+                    "id": ConfigManager.get_secret("WHATSAPP_BUSINESS_ACCOUNT_ID", "TEST_ID"),
                     "changes": [{
                         "value": {
                             "messaging_product": "whatsapp",
                             "metadata": {
-                                "display_phone_number": "TEST_NUMBER",
-                                "phone_number_id": "TEST_ID"
+                                "display_phone_number": ConfigManager.get_secret("PHONE_NUMBER_ID", "TEST_NUMBER"),
+                                "phone_number_id": ConfigManager.get_secret("PHONE_NUMBER_ID", "TEST_ID")
                             },
                             "messages": [{
-                                "from": "TEST_NUMBER",
+                                "from": ConfigManager.get_secret("PHONE_NUMBER_ID", "TEST_NUMBER"),
                                 "id": "TEST_MESSAGE_ID",
                                 "timestamp": str(int(datetime.now().timestamp())),
                                 "text": {
@@ -276,14 +302,6 @@ class WebhookTester:
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
 
-# Inicialização dos componentes
-@st.cache_resource
-def initialize_components():
-    data_manager = DataManager()
-    ai_assistant = AIFinanceAssistant()
-    webhook_tester = WebhookTester()
-    return data_manager, ai_assistant, webhook_tester
-
 # Rotas do Flask para webhook
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -294,8 +312,6 @@ def webhook():
             mensagem = data['messages'][0]
             numero = mensagem['from']
             texto = mensagem['text']['body']
-            
-            data_manager, ai_assistant, _ = initialize_components()
             
             if texto.lower() == 'relatorio':
                 relatorio, _ = ai_assistant.gerar_relatorio_mensal(
@@ -325,26 +341,49 @@ Descrição: {resultado['descricao']}"""
 
 @flask_app.route('/webhook', methods=['GET'])
 def verificar():
-    if request.args.get('hub.verify_token') == st.secrets["VERIFY_TOKEN"]:
-        return request.args.get('hub.challenge')
-    return 'Token inválido', 403
+    try:
+        verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
+        if request.args.get('hub.verify_token') == verify_token:
+            return request.args.get('hub.challenge')
+        return 'Token inválido', 403
+    except Exception as e:
+        st.error(f"Erro na verificação: {str(e)}")
+        return 'Erro', 500
 
-def main():
-    data_manager, ai_assistant, webhook_tester = initialize_components()
-    
-    st.title("💰 Assistente Financeiro Inteligente")
-    
+# Inicialização dos componentes
+@st.cache_resource
+def initialize_components():
+    """Inicializa todos os componentes do aplicativo"""
+    whatsapp_api, openai_client = ConfigManager.initialize_apis()
+    data_manager = DataManager()
+    ai_assistant = AIFinanceAssistant(openai_client)
+    webhook_tester = WebhookTester()
+    return data_manager, ai_assistant, webhook_tester, whatsapp_api
+
+def render_sidebar(webhook_tester):
+    """Renderiza a barra lateral"""
     with st.sidebar:
         st.title("⚙️ Configurações")
         
+        # Status das APIs
         st.subheader("Status das APIs")
-        openai_status = "✅ Conectado" if st.secrets.get("OPENAI_API_KEY") else "❌ Não configurado"
-        whatsapp_status = "✅ Conectado" if st.secrets.get("WHATSAPP_TOKEN") else "❌ Não configurado"
+        openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
+        whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
         
         st.write(f"OpenAI API: {openai_status}")
         st.write(f"WhatsApp API: {whatsapp_status}")
         
+        # Teste de Webhook
         webhook_tester.render_test_interface()
+
+def main():
+    """Função principal do aplicativo"""
+    data_manager, ai_assistant, webhook_tester, whatsapp_api = initialize_components()
+    
+    st.title("💰 Assistente Financeiro Inteligente")
+    
+    # Renderizar sidebar
+    render_sidebar(webhook_tester)
     
     if data_manager.has_data():
         tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📝 Registros", "🤖 Análise IA"])
@@ -352,7 +391,8 @@ def main():
         with tab1:
             st.subheader("Dashboard Financeiro")
             relatorio, fig = ai_assistant.gerar_relatorio_mensal(data_manager.get_dataframe())
-            st.plotly_chart(fig, use_container_width=True)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
             st.markdown(relatorio)
             
         with tab2:
