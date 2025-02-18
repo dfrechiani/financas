@@ -79,24 +79,25 @@ class ConfigManager:
 
 class DataManager:
     def __init__(self):
-        if "df" not in st.session_state:
-            st.session_state["df"] = pd.DataFrame(
-                columns=["data", "categoria", "valor", "descricao"]
+        if 'df' not in st.session_state:
+            st.session_state.df = pd.DataFrame(
+                columns=['data', 'categoria', 'valor', 'descricao']
             )
     
     def adicionar_gasto(self, gasto: dict) -> bool:
         try:
             novo_gasto = {
-                "data": datetime.now(),
-                "categoria": gasto.get("categoria", "").lower(),
-                "valor": float(gasto.get("valor", 0)),
-                "descricao": gasto.get("descricao", "")
+                'data': datetime.now(),
+                'categoria': gasto.get('categoria', '').lower(),
+                'valor': float(gasto.get('valor', 0)),
+                'descricao': gasto.get('descricao', '')
             }
-            # Usa o st.session_state como dicionário
-            st.session_state["df"] = pd.concat(
-                [st.session_state["df"], pd.DataFrame([novo_gasto])],
+            
+            st.session_state.df = pd.concat(
+                [st.session_state.df, pd.DataFrame([novo_gasto])],
                 ignore_index=True
             )
+            
             self.salvar_dados()
             return True
             
@@ -105,19 +106,15 @@ class DataManager:
             return False
     
     def get_dataframe(self) -> pd.DataFrame:
-        if "df" not in st.session_state:
-            st.session_state["df"] = pd.DataFrame(
-                columns=["data", "categoria", "valor", "descricao"]
-            )
-        return st.session_state["df"]
+        return st.session_state.df
     
     def has_data(self) -> bool:
-        return not self.get_dataframe().empty
+        return not st.session_state.df.empty
     
     def salvar_dados(self):
         try:
             Path("data").mkdir(exist_ok=True)
-            st.session_state["df"].to_csv("data/gastos.csv", index=False)
+            st.session_state.df.to_csv("data/gastos.csv", index=False)
         except Exception as e:
             st.error(f"Erro ao salvar dados: {str(e)}")
     
@@ -125,8 +122,8 @@ class DataManager:
         try:
             if Path("data/gastos.csv").exists():
                 df = pd.read_csv("data/gastos.csv")
-                df["data"] = pd.to_datetime(df["data"])
-                st.session_state["df"] = df
+                df['data'] = pd.to_datetime(df['data'])
+                st.session_state.df = df
         except Exception as e:
             st.error(f"Erro ao carregar dados: {str(e)}")
 
@@ -153,7 +150,7 @@ class WhatsAppMessageHandler:
             if response.status_code == 200:
                 file_data = response.json()
                 # Download do arquivo
-                file_response = requests.get(file_data.get("url", ""), headers=headers)
+                file_response = requests.get(file_data.get('url', ''), headers=headers)
                 return file_response.content
             return None
         except Exception as e:
@@ -171,7 +168,7 @@ class WhatsAppMessageHandler:
             response = self.ai_assistant.analyze_image(image_content)
             
             # Processar os gastos identificados
-            gastos = response.get("gastos", [])
+            gastos = response.get('gastos', [])
             for gasto in gastos:
                 self.data_manager.adicionar_gasto(gasto)
             
@@ -195,11 +192,11 @@ class WhatsAppMessageHandler:
             # Identificar tipo do arquivo (assumindo que doc_id contenha extensão)
             extension = self.get_file_extension(doc_id)
             
-            if extension == "csv":
+            if extension == 'csv':
                 # Processar CSV
-                df = pd.read_csv(io.StringIO(doc_content.decode("utf-8")))
+                df = pd.read_csv(io.StringIO(doc_content.decode('utf-8')))
                 gastos = self.ai_assistant.analyze_bank_csv(df)
-            elif extension == "pdf":
+            elif extension == 'pdf':
                 # Processar PDF
                 gastos = self.ai_assistant.analyze_bank_pdf(doc_content)
             else:
@@ -222,7 +219,7 @@ class WhatsAppMessageHandler:
 
     def get_file_extension(self, filename):
         """Obtém a extensão do arquivo"""
-        return filename.split(".")[-1].lower()
+        return filename.split('.')[-1].lower()
 
 class AIFinanceAssistant:
     def __init__(self, openai_client):
@@ -317,8 +314,8 @@ class AIFinanceAssistant:
         if df.empty:
             return "Ainda não há dados suficientes para análise."
 
-        resumo_categorias = df.groupby("categoria")["valor"].agg(["sum", "count", "mean"])
-        tendencia_mensal = df.groupby(df["data"].dt.strftime("%Y-%m"))["valor"].sum()
+        resumo_categorias = df.groupby('categoria')['valor'].agg(['sum', 'count', 'mean'])
+        tendencia_mensal = df.groupby(df['data'].dt.strftime('%Y-%m'))['valor'].sum()
         
         contexto = f"""
 Analise os seguintes dados financeiros e forneça insights detalhados:
@@ -354,22 +351,22 @@ Forneça:
             return "Nenhum gasto registrado ainda.", None
         
         mes_atual = datetime.now().month
-        df["data"] = pd.to_datetime(df["data"])
-        df_mes = df[df["data"].dt.month == mes_atual]
+        df['data'] = pd.to_datetime(df['data'])
+        df_mes = df[df['data'].dt.month == mes_atual]
         
         if df_mes.empty:
             return "Nenhum gasto registrado este mês.", None
         
-        gastos_categoria = df_mes.groupby("categoria")["valor"].sum()
-        total_gasto = df_mes["valor"].sum()
-        media_diaria = total_gasto / df_mes["data"].dt.day.nunique()
+        gastos_categoria = df_mes.groupby('categoria')['valor'].sum()
+        total_gasto = df_mes['valor'].sum()
+        media_diaria = total_gasto / df_mes['data'].dt.day.nunique()
         
         fig = px.pie(
             values=gastos_categoria.values,
             names=gastos_categoria.index,
-            title="Distribuição de Gastos por Categoria"
+            title='Distribuição de Gastos por Categoria'
         )
-        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_traces(textposition='inside', textinfo='percent+label')
         
         relatorio = f"""### 📊 Resumo Financeiro do Mês
 
@@ -386,7 +383,7 @@ Forneça:
 
 class WebhookTester:
     def __init__(self):
-        self.base_url = ConfigManager.get_secret("STREAMLIT_URL", "seu-app-name.streamlit.app")
+        self.base_url = ConfigManager.get_secret('STREAMLIT_URL', 'seu-app-name.streamlit.app')
     
     def render_test_interface(self):
         st.subheader("🔧 Teste do Webhook")
@@ -439,7 +436,7 @@ class WebhookTester:
                 st.success("✅ Webhook respondeu corretamente!")
                 try:
                     st.json(response.json())
-                except Exception:
+                except:
                     st.text(response.text)
             else:
                 st.error(f"❌ Erro no webhook: {response.status_code}")
@@ -449,7 +446,7 @@ class WebhookTester:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
 
 # Rotas do Flask para o Webhook
-@flask_app.route("/webhook", methods=["POST"])
+@flask_app.route('/webhook', methods=['POST'])
 def webhook_post():
     data = request.json
     try:
@@ -468,14 +465,14 @@ def webhook_post():
                     data_manager = DataManager()
                     ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
                     
-                    if texto.lower() == "relatorio":
+                    if texto.lower() == 'relatorio':
                         relatorio, _ = ai_assistant.gerar_relatorio_mensal(
                             data_manager.get_dataframe()
                         )
                         ConfigManager.send_whatsapp_message(numero, relatorio)
                     else:
                         resultado = ai_assistant.processar_mensagem(texto)
-                        if resultado.get("sucesso"):
+                        if resultado.get('sucesso'):
                             if data_manager.adicionar_gasto(resultado):
                                 mensagem_envio = (
                                     f"✅ Gasto registrado com sucesso!\n\n"
@@ -486,7 +483,7 @@ def webhook_post():
                             else:
                                 mensagem_envio = "❌ Erro ao salvar o gasto."
                         else:
-                            mensagem_envio = resultado.get("mensagem", "Erro ao processar a mensagem.")
+                            mensagem_envio = resultado.get('mensagem', 'Erro ao processar a mensagem.')
                         
                         ConfigManager.send_whatsapp_message(numero, mensagem_envio)
         
@@ -494,16 +491,16 @@ def webhook_post():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@flask_app.route("/webhook", methods=["GET"])
+@flask_app.route('/webhook', methods=['GET'])
 def webhook_verify():
     try:
         verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
 
         if mode and token:
-            if mode == "subscribe" and token == verify_token:
+            if mode == 'subscribe' and token == verify_token:
                 return challenge, 200
             else:
                 return jsonify({"status": "error", "message": "Token inválido"}), 403
@@ -582,7 +579,7 @@ def main():
 """)
 
 def start_flask():
-    flask_app.run(host="0.0.0.0", port=5000)
+    flask_app.run(host='0.0.0.0', port=5000)
 
 if __name__ == "__main__":
     # Inicia o servidor Flask em uma thread separada
