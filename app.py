@@ -17,6 +17,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+if "df" not in st.session_state:
+    st.session_state.df = pd.DataFrame(
+        columns=['data', 'categoria', 'valor', 'descricao']
+    )
+
 # Inicialização do Flask
 flask_app = Flask(__name__)
 
