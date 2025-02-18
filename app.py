@@ -7,8 +7,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 from threading import Thread
 import requests
-import io
-import openai
+from openai import OpenAI
 
 # Configuração inicial do Streamlit
 st.set_page_config(
@@ -23,12 +22,11 @@ flask_app = Flask(__name__)
 
 class ConfigManager:
     """Gerencia as configurações e secrets do aplicativo"""
-    
     @staticmethod
     def get_secret(key: str, default: str = None) -> str:
         """Recupera um secret de forma segura"""
         try:
-            return st.secrets[key] if key in st.secrets else default
+            return st.secrets.secrets[key]
         except Exception as e:
             if default:
                 return default
@@ -41,9 +39,6 @@ class ConfigManager:
         try:
             token = ConfigManager.get_secret("WHATSAPP_TOKEN")
             phone_number_id = ConfigManager.get_secret("PHONE_NUMBER_ID")
-            if not token or not phone_number_id:
-                st.error("Token ou ID do número de telefone não configurados.")
-                return False
             
             url = f"https://graph.facebook.com/v17.0/{phone_number_id}/messages"
             
@@ -68,14 +63,9 @@ class ConfigManager:
 
     @staticmethod
     def initialize_openai():
-        """Inicializa a API da OpenAI e retorna o módulo openai configurado"""
+        """Inicializa a API da OpenAI"""
         openai_key = ConfigManager.get_secret("OPENAI_API_KEY")
-        if openai_key:
-            openai.api_key = openai_key
-            return openai
-        else:
-            st.error("Chave da OpenAI não configurada.")
-            return None
+        return OpenAI(api_key=openai_key) if openai_key else None
 
 class DataManager:
     def __init__(self):
@@ -88,9 +78,9 @@ class DataManager:
         try:
             novo_gasto = {
                 'data': datetime.now(),
-                'categoria': gasto.get('categoria', '').lower(),
-                'valor': float(gasto.get('valor', 0)),
-                'descricao': gasto.get('descricao', '')
+                'categoria': gasto['categoria'].lower(),
+                'valor': float(gasto['valor']),
+                'descricao': gasto['descricao']
             }
             
             st.session_state.df = pd.concat(
@@ -127,100 +117,6 @@ class DataManager:
         except Exception as e:
             st.error(f"Erro ao carregar dados: {str(e)}")
 
-class WhatsAppMessageHandler:
-    def __init__(self, ai_assistant, data_manager):
-        self.ai_assistant = ai_assistant
-        self.data_manager = data_manager
-
-    def download_file(self, file_id):
-        """Faz download de arquivo via Media API do WhatsApp"""
-        try:
-            token = ConfigManager.get_secret("WHATSAPP_TOKEN")
-            if not token:
-                st.error("Token do WhatsApp não configurado.")
-                return None
-            url = f"https://graph.facebook.com/v17.0/{file_id}"
-            
-            headers = {
-                "Authorization": f"Bearer {token}",
-            }
-            
-            # Obter URL do arquivo
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                file_data = response.json()
-                # Download do arquivo
-                file_response = requests.get(file_data.get('url', ''), headers=headers)
-                return file_response.content
-            return None
-        except Exception as e:
-            st.error(f"Erro ao baixar arquivo: {str(e)}")
-            return None
-
-    def process_image(self, image_id, number):
-        """Processa imagem usando OCR e GPT-4 Vision"""
-        try:
-            image_content = self.download_file(image_id)
-            if not image_content:
-                return "Erro ao baixar imagem"
-
-            # Usar GPT-4 Vision para analisar a imagem (simulado)
-            response = self.ai_assistant.analyze_image(image_content)
-            
-            # Processar os gastos identificados
-            gastos = response.get('gastos', [])
-            for gasto in gastos:
-                self.data_manager.adicionar_gasto(gasto)
-            
-            mensagem = f"✅ Identifiquei {len(gastos)} gastos na imagem:\n\n"
-            for gasto in gastos:
-                mensagem += f"- {gasto['descricao']}: R$ {float(gasto['valor']):.2f} ({gasto['categoria']})\n"
-            
-            ConfigManager.send_whatsapp_message(number, mensagem)
-            return "Imagem processada com sucesso"
-
-        except Exception as e:
-            return f"Erro ao processar imagem: {str(e)}"
-
-    def process_document(self, doc_id, number):
-        """Processa documentos (CSV, PDF) enviados pelo banco"""
-        try:
-            doc_content = self.download_file(doc_id)
-            if not doc_content:
-                return "Erro ao baixar documento"
-
-            # Identificar tipo do arquivo (assumindo que doc_id contenha extensão)
-            extension = self.get_file_extension(doc_id)
-            
-            if extension == 'csv':
-                # Processar CSV
-                df = pd.read_csv(io.StringIO(doc_content.decode('utf-8')))
-                gastos = self.ai_assistant.analyze_bank_csv(df)
-            elif extension == 'pdf':
-                # Processar PDF
-                gastos = self.ai_assistant.analyze_bank_pdf(doc_content)
-            else:
-                return "Formato de arquivo não suportado"
-
-            # Adicionar gastos identificados
-            for gasto in gastos:
-                self.data_manager.adicionar_gasto(gasto)
-            
-            mensagem = f"✅ Processado {len(gastos)} transações do arquivo:\n\n"
-            total = sum(float(gasto['valor']) for gasto in gastos)
-            mensagem += f"Total: R$ {total:.2f}\n\n"
-            mensagem += "Digite 'relatorio' para ver o resumo completo."
-            
-            ConfigManager.send_whatsapp_message(number, mensagem)
-            return "Documento processado com sucesso"
-
-        except Exception as e:
-            return f"Erro ao processar documento: {str(e)}"
-
-    def get_file_extension(self, filename):
-        """Obtém a extensão do arquivo"""
-        return filename.split('.')[-1].lower()
-
 class AIFinanceAssistant:
     def __init__(self, openai_client):
         self.client = openai_client
@@ -232,31 +128,39 @@ class AIFinanceAssistant:
                 "mensagem": "Cliente OpenAI não inicializado. Verifique as configurações."
             }
 
-        system_prompt = (
-            "Você é um assistente financeiro especializado em:\n"
-            "1. Extrair informações de gastos de mensagens em linguagem natural\n"
-            "2. Categorizar gastos apropriadamente\n"
-            "3. Identificar valores e descrições\n\n"
-            "Categorias possíveis:\n"
-            "- alimentacao\n"
-            "- transporte\n"
-            "- moradia\n"
-            "- saude\n"
-            "- educacao\n"
-            "- lazer\n"
-            "- outros\n\n"
-            "Retorne apenas um JSON com os campos:\n"
-            '{ "categoria": string, "valor": float, "descricao": string, "sucesso": boolean, "mensagem": string }'
-        )
+        system_prompt = """Você é um assistente financeiro especializado em:
+        1. Extrair informações de gastos de mensagens em linguagem natural
+        2. Categorizar gastos apropriadamente
+        3. Identificar valores e descrições
+        
+        Categorias possíveis:
+        - alimentacao
+        - transporte
+        - moradia
+        - saude
+        - educacao
+        - lazer
+        - outros
+        
+        Retorne apenas um JSON com os campos:
+        {
+            "categoria": string,
+            "valor": float,
+            "descricao": string,
+            "sucesso": boolean,
+            "mensagem": string
+        }"""
 
         try:
-            response = self.client.ChatCompletion.create(
-                model="gpt-4",
+            response = self.client.chat.completions.create(
+                model="gpt-4-turbo-preview",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": mensagem}
-                ]
+                ],
+                response_format={"type": "json_object"}
             )
+            
             resultado = json.loads(response.choices[0].message.content)
             return resultado
             
@@ -265,47 +169,6 @@ class AIFinanceAssistant:
                 "sucesso": False,
                 "mensagem": f"Erro ao processar mensagem: {str(e)}"
             }
-    
-    def analyze_image(self, image_content) -> dict:
-        """
-        Simula a análise de uma imagem usando GPT-4 Vision.
-        Substitua por uma implementação real conforme disponível.
-        """
-        # Simulação: suponha que a imagem contenha um gasto de R$50 no almoço.
-        return {
-            "gastos": [
-                {"categoria": "alimentacao", "valor": 50.0, "descricao": "Almoço"}
-            ]
-        }
-
-    def analyze_bank_csv(self, df: pd.DataFrame):
-        """
-        Simula a análise de um CSV bancário.
-        Mapeia colunas comuns para gastos.
-        """
-        gastos = []
-        # Supondo que o CSV tenha colunas 'amount' e 'description'
-        for _, row in df.iterrows():
-            try:
-                gasto = {
-                    "categoria": "outros",
-                    "valor": float(row.get("amount", 0)),
-                    "descricao": row.get("description", "Transação CSV")
-                }
-                gastos.append(gasto)
-            except Exception as e:
-                continue
-        return gastos
-
-    def analyze_bank_pdf(self, doc_content):
-        """
-        Simula a análise de um PDF bancário.
-        Em produção, utilize uma biblioteca para leitura de PDF (ex.: PyPDF2).
-        """
-        # Simulação: retorna um gasto fixo
-        return [
-            {"categoria": "outros", "valor": 100.0, "descricao": "Transação PDF simulada"}
-        ]
 
     def analisar_padroes(self, df: pd.DataFrame) -> str:
         if not self.client:
@@ -318,29 +181,31 @@ class AIFinanceAssistant:
         tendencia_mensal = df.groupby(df['data'].dt.strftime('%Y-%m'))['valor'].sum()
         
         contexto = f"""
-Analise os seguintes dados financeiros e forneça insights detalhados:
+        Analise os seguintes dados financeiros e forneça insights detalhados:
 
-Resumo por categoria:
-{resumo_categorias.to_string()}
+        Resumo por categoria:
+        {resumo_categorias.to_string()}
+        
+        Tendência mensal:
+        {tendencia_mensal.to_string()}
+        
+        Forneça:
+        1. Principais insights sobre os padrões de gastos
+        2. Sugestões específicas de economia baseadas nos dados
+        3. Identificação de possíveis gastos anormais ou excessivos
+        4. Previsões e tendências futuras
+        5. Recomendações práticas para melhor gestão financeira
+        """
 
-Tendência mensal:
-{tendencia_mensal.to_string()}
-
-Forneça:
-1. Principais insights sobre os padrões de gastos
-2. Sugestões específicas de economia baseadas nos dados
-3. Identificação de possíveis gastos anormais ou excessivos
-4. Previsões e tendências futuras
-5. Recomendações práticas para melhor gestão financeira
-"""
         try:
-            response = self.client.ChatCompletion.create(
-                model="gpt-4",
+            response = self.client.chat.completions.create(
+                model="gpt-4-turbo-preview",
                 messages=[
                     {"role": "system", "content": "Você é um analista financeiro especializado em finanças pessoais."},
                     {"role": "user", "content": contexto}
                 ]
             )
+            
             return response.choices[0].message.content
             
         except Exception as e:
@@ -375,6 +240,7 @@ Forneça:
 
 #### Gastos por Categoria:
 """
+        
         for categoria, valor in gastos_categoria.items():
             percentual = (valor / total_gasto) * 100
             relatorio += f"- {categoria.title()}: R$ {valor:.2f} ({percentual:.1f}%)\n"
@@ -399,6 +265,7 @@ class WebhookTester:
     def test_webhook(self, message: str):
         try:
             webhook_url = f"https://{self.base_url}/webhook"
+            
             test_data = {
                 "object": "whatsapp_business_account",
                 "entry": [{
@@ -445,47 +312,39 @@ class WebhookTester:
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
 
-# Rotas do Flask para o Webhook
 @flask_app.route('/webhook', methods=['POST'])
 def webhook_post():
     data = request.json
+    
     try:
-        # Extrair a mensagem do payload do WhatsApp (estrutura aninhada)
-        entry = data.get("entry", [])
-        if entry:
-            changes = entry[0].get("changes", [])
-            if changes:
-                value = changes[0].get("value", {})
-                messages = value.get("messages", [])
-                if messages:
-                    mensagem_data = messages[0]
-                    numero = mensagem_data.get("from")
-                    texto = mensagem_data.get("text", {}).get("body", "")
-                    
-                    data_manager = DataManager()
-                    ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
-                    
-                    if texto.lower() == 'relatorio':
-                        relatorio, _ = ai_assistant.gerar_relatorio_mensal(
-                            data_manager.get_dataframe()
-                        )
-                        ConfigManager.send_whatsapp_message(numero, relatorio)
-                    else:
-                        resultado = ai_assistant.processar_mensagem(texto)
-                        if resultado.get('sucesso'):
-                            if data_manager.adicionar_gasto(resultado):
-                                mensagem_envio = (
-                                    f"✅ Gasto registrado com sucesso!\n\n"
-                                    f"Categoria: {resultado.get('categoria')}\n"
-                                    f"Valor: R$ {float(resultado.get('valor')):.2f}\n"
-                                    f"Descrição: {resultado.get('descricao')}"
-                                )
-                            else:
-                                mensagem_envio = "❌ Erro ao salvar o gasto."
-                        else:
-                            mensagem_envio = resultado.get('mensagem', 'Erro ao processar a mensagem.')
+        if 'messages' in data and data['messages']:
+            mensagem = data['messages'][0]
+            numero = mensagem['from']
+            texto = mensagem['text']['body']
+            
+            data_manager = DataManager()
+            ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
+            
+            if texto.lower() == 'relatorio':
+                relatorio, _ = ai_assistant.gerar_relatorio_mensal(
+                    data_manager.get_dataframe()
+                )
+                ConfigManager.send_whatsapp_message(numero, relatorio)
+            else:
+                resultado = ai_assistant.processar_mensagem(texto)
+                if resultado['sucesso']:
+                    if data_manager.adicionar_gasto(resultado):
+                        mensagem = f"""✅ Gasto registrado com sucesso!
                         
-                        ConfigManager.send_whatsapp_message(numero, mensagem_envio)
+Categoria: {resultado['categoria']}
+Valor: R$ {resultado['valor']:.2f}
+Descrição: {resultado['descricao']}"""
+                    else:
+                        mensagem = "❌ Erro ao salvar o gasto."
+                else:
+                    mensagem = resultado['mensagem']
+                
+                ConfigManager.send_whatsapp_message(numero, mensagem)
         
         return jsonify({"status": "success", "message": "Mensagem processada com sucesso"}), 200
     except Exception as e:
@@ -509,7 +368,7 @@ def webhook_verify():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Inicialização dos componentes com cache
+# Inicialização dos componentes
 @st.cache_resource
 def initialize_components():
     data_manager = DataManager()
@@ -521,8 +380,8 @@ def initialize_components():
 def render_sidebar(webhook_tester):
     with st.sidebar:
         st.title("⚙️ Configurações")
-        st.subheader("Status das APIs")
         
+        st.subheader("Status das APIs")
         openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
         whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
         
@@ -535,6 +394,7 @@ def main():
     data_manager, ai_assistant, webhook_tester = initialize_components()
     
     st.title("💰 Assistente Financeiro Inteligente")
+    
     render_sidebar(webhook_tester)
     
     if data_manager.has_data():
@@ -567,25 +427,25 @@ def main():
     else:
         st.info("👋 Bem-vindo! Envie mensagens pelo WhatsApp para começar a registrar seus gastos.")
         st.markdown("""
-### Como usar:
-1. Envie mensagens descrevendo seus gastos
-2. A IA interpretará e categorizará automaticamente
-3. Peça relatórios digitando "relatorio"
-
-**Exemplos de mensagens:**
-- "Gastei 50 reais no almoço hoje"
-- "Paguei a conta de luz de 150 reais"
-- "Comprei um livro por 45,90"
-""")
+        ### Como usar:
+        1. Envie mensagens descrevendo seus gastos
+        2. A IA interpretará e categorizará automaticamente
+        3. Peça relatórios digitando "relatorio"
+        
+        **Exemplos de mensagens:**
+        - "Gastei 50 reais no almoço hoje"
+        - "Paguei a conta de luz de 150 reais"
+        - "Comprei um livro por 45,90"
+        """)
 
 def start_flask():
     flask_app.run(host='0.0.0.0', port=5000)
 
 if __name__ == "__main__":
-    # Inicia o servidor Flask em uma thread separada
+    # Iniciar o servidor webhook em uma thread separada
     flask_thread = Thread(target=start_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Inicia a aplicação Streamlit
+    # Iniciar a aplicação Streamlit
     main()
