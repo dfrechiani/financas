@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 from flask import Flask, request
 from threading import Thread
-from whatsapp_api_client_python import API
-from openai import OpenAI
 import requests
+from openai import OpenAI
 
 # Configuração inicial do Streamlit
 st.set_page_config(
@@ -35,15 +34,38 @@ class ConfigManager:
             return None
 
     @staticmethod
-    def initialize_apis():
-        """Inicializa as APIs necessárias"""
-        whatsapp_token = ConfigManager.get_secret("WHATSAPP_TOKEN")
+    def send_whatsapp_message(phone_number: str, message: str) -> bool:
+        """Envia mensagem usando a API do WhatsApp"""
+        try:
+            token = ConfigManager.get_secret("WHATSAPP_TOKEN")
+            phone_number_id = ConfigManager.get_secret("PHONE_NUMBER_ID")
+            
+            url = f"https://graph.facebook.com/v17.0/{phone_number_id}/messages"
+            
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "messaging_product": "whatsapp",
+                "to": phone_number,
+                "type": "text",
+                "text": {"body": message}
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            return response.status_code == 200
+            
+        except Exception as e:
+            st.error(f"Erro ao enviar mensagem WhatsApp: {str(e)}")
+            return False
+
+    @staticmethod
+    def initialize_openai():
+        """Inicializa a API da OpenAI"""
         openai_key = ConfigManager.get_secret("OPENAI_API_KEY")
-
-        whatsapp_api = API(whatsapp_token) if whatsapp_token else None
-        openai_client = OpenAI(api_key=openai_key) if openai_key else None
-
-        return whatsapp_api, openai_client
+        return OpenAI(api_key=openai_key) if openai_key else None
 
 class DataManager:
     """Gerencia o armazenamento e manipulação dos dados"""
@@ -234,6 +256,7 @@ class AIFinanceAssistant:
             relatorio += f"- {categoria.title()}: R$ {valor:.2f} ({percentual:.1f}%)\n"
         
         return relatorio, fig
+
 class WebhookTester:
     """Testa a funcionalidade do webhook"""
     def __init__(self):
@@ -313,11 +336,14 @@ def webhook():
             numero = mensagem['from']
             texto = mensagem['text']['body']
             
+            data_manager = DataManager()
+            ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
+            
             if texto.lower() == 'relatorio':
                 relatorio, _ = ai_assistant.gerar_relatorio_mensal(
                     data_manager.get_dataframe()
                 )
-                whatsapp_api.send_message(numero, relatorio)
+                ConfigManager.send_whatsapp_message(numero, relatorio)
             else:
                 resultado = ai_assistant.processar_mensagem(texto)
                 if resultado['sucesso']:
@@ -332,12 +358,17 @@ Descrição: {resultado['descricao']}"""
                 else:
                     mensagem = resultado['mensagem']
                 
-                whatsapp_api.send_message(numero, mensagem)
+                ConfigManager.send_whatsapp_message(numero, mensagem)
         
         return 'OK', 200
     except Exception as e:
         st.error(f"Erro no webhook: {str(e)}")
         return 'Erro', 500
+
+@flask_app.route('/webhook', methods=['GET'])
+def verificar():
+    try:
+        verify_token = ConfigManager.
 
 @flask_app.route('/webhook', methods=['GET'])
 def verificar():
@@ -354,11 +385,11 @@ def verificar():
 @st.cache_resource
 def initialize_components():
     """Inicializa todos os componentes do aplicativo"""
-    whatsapp_api, openai_client = ConfigManager.initialize_apis()
     data_manager = DataManager()
+    openai_client = ConfigManager.initialize_openai()
     ai_assistant = AIFinanceAssistant(openai_client)
     webhook_tester = WebhookTester()
-    return data_manager, ai_assistant, webhook_tester, whatsapp_api
+    return data_manager, ai_assistant, webhook_tester
 
 def render_sidebar(webhook_tester):
     """Renderiza a barra lateral"""
@@ -378,7 +409,7 @@ def render_sidebar(webhook_tester):
 
 def main():
     """Função principal do aplicativo"""
-    data_manager, ai_assistant, webhook_tester, whatsapp_api = initialize_components()
+    data_manager, ai_assistant, webhook_tester = initialize_components()
     
     st.title("💰 Assistente Financeiro Inteligente")
     
