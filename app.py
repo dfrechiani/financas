@@ -68,7 +68,6 @@ class ConfigManager:
         return OpenAI(api_key=openai_key) if openai_key else None
 
 class DataManager:
-    """Gerencia o armazenamento e manipulação dos dados"""
     def __init__(self):
         if 'df' not in st.session_state:
             st.session_state.df = pd.DataFrame(
@@ -76,7 +75,6 @@ class DataManager:
             )
     
     def adicionar_gasto(self, gasto: dict) -> bool:
-        """Adiciona um novo gasto ao DataFrame"""
         try:
             novo_gasto = {
                 'data': datetime.now(),
@@ -98,15 +96,12 @@ class DataManager:
             return False
     
     def get_dataframe(self) -> pd.DataFrame:
-        """Retorna o DataFrame atual"""
         return st.session_state.df
     
     def has_data(self) -> bool:
-        """Verifica se existem dados registrados"""
         return not st.session_state.df.empty
     
     def salvar_dados(self):
-        """Salva os dados em CSV"""
         try:
             Path("data").mkdir(exist_ok=True)
             st.session_state.df.to_csv("data/gastos.csv", index=False)
@@ -114,7 +109,6 @@ class DataManager:
             st.error(f"Erro ao salvar dados: {str(e)}")
     
     def carregar_dados(self):
-        """Carrega dados do CSV se existir"""
         try:
             if Path("data/gastos.csv").exists():
                 df = pd.read_csv("data/gastos.csv")
@@ -124,12 +118,10 @@ class DataManager:
             st.error(f"Erro ao carregar dados: {str(e)}")
 
 class AIFinanceAssistant:
-    """Assistente de IA para processamento de mensagens e análise financeira"""
     def __init__(self, openai_client):
         self.client = openai_client
     
     def processar_mensagem(self, mensagem: str) -> dict:
-        """Processa mensagem do usuário usando GPT-4"""
         if not self.client:
             return {
                 "sucesso": False,
@@ -179,7 +171,6 @@ class AIFinanceAssistant:
             }
 
     def analisar_padroes(self, df: pd.DataFrame) -> str:
-        """Análise avançada dos padrões de gastos"""
         if not self.client:
             return "Cliente OpenAI não inicializado. Verifique as configurações."
 
@@ -221,7 +212,6 @@ class AIFinanceAssistant:
             return f"Erro na análise: {str(e)}"
 
     def gerar_relatorio_mensal(self, df: pd.DataFrame):
-        """Gera relatório mensal com visualizações"""
         if df.empty:
             return "Nenhum gasto registrado ainda.", None
         
@@ -258,12 +248,10 @@ class AIFinanceAssistant:
         return relatorio, fig
 
 class WebhookTester:
-    """Testa a funcionalidade do webhook"""
     def __init__(self):
         self.base_url = ConfigManager.get_secret('STREAMLIT_URL', 'seu-app-name.streamlit.app')
     
     def render_test_interface(self):
-        """Renderiza a interface de teste do webhook"""
         st.subheader("🔧 Teste do Webhook")
         
         test_message = st.text_input(
@@ -275,7 +263,6 @@ class WebhookTester:
             self.test_webhook(test_message)
     
     def test_webhook(self, message: str):
-        """Executa o teste do webhook"""
         try:
             webhook_url = f"https://{self.base_url}/webhook"
             
@@ -324,46 +311,6 @@ class WebhookTester:
             
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
-
-# Rotas do Flask para webhook
-@flask_app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.json
-    
-    try:
-        if 'messages' in data and data['messages']:
-            mensagem = data['messages'][0]
-            numero = mensagem['from']
-            texto = mensagem['text']['body']
-            
-            data_manager = DataManager()
-            ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
-            
-            if texto.lower() == 'relatorio':
-                relatorio, _ = ai_assistant.gerar_relatorio_mensal(
-                    data_manager.get_dataframe()
-                )
-                ConfigManager.send_whatsapp_message(numero, relatorio)
-            else:
-                resultado = ai_assistant.processar_mensagem(texto)
-                if resultado['sucesso']:
-                    if data_manager.adicionar_gasto(resultado):
-                        mensagem = f"""✅ Gasto registrado com sucesso!
-                        
-Categoria: {resultado['categoria']}
-Valor: R$ {resultado['valor']:.2f}
-Descrição: {resultado['descricao']}"""
-                    else:
-                        mensagem = "❌ Erro ao salvar o gasto."
-                else:
-                    mensagem = resultado['mensagem']
-                
-                ConfigManager.send_whatsapp_message(numero, mensagem)
-        
-        return 'OK', 200
-    except Exception as e:
-        st.error(f"Erro no webhook: {str(e)}")
-        return 'Erro', 500
 
 # Rotas do Flask para webhook
 @flask_app.route('/webhook', methods=['POST'])
@@ -424,12 +371,84 @@ def webhook_verify():
         st.error(f"Erro na verificação: {str(e)}")
         return str(e), 500
 
+# Inicialização dos componentes
+@st.cache_resource
+def initialize_components():
+    data_manager = DataManager()
+    openai_client = ConfigManager.initialize_openai()
+    ai_assistant = AIFinanceAssistant(openai_client)
+    webhook_tester = WebhookTester()
+    return data_manager, ai_assistant, webhook_tester
+
+def render_sidebar(webhook_tester):
+    with st.sidebar:
+        st.title("⚙️ Configurações")
+        
+        st.subheader("Status das APIs")
+        openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
+        whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
+        
+        st.write(f"OpenAI API: {openai_status}")
+        st.write(f"WhatsApp API: {whatsapp_status}")
+        
+        webhook_tester.render_test_interface()
+
+def main():
+    data_manager, ai_assistant, webhook_tester = initialize_components()
+    
+    st.title("💰 Assistente Financeiro Inteligente")
+    
+    render_sidebar(webhook_tester)
+    
+    if data_manager.has_data():
+        tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📝 Registros", "🤖 Análise IA"])
+        
+        with tab1:
+            st.subheader("Dashboard Financeiro")
+            relatorio, fig = ai_assistant.gerar_relatorio_mensal(data_manager.get_dataframe())
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            st.markdown(relatorio)
+            
+        with tab2:
+            st.subheader("Registros de Gastos")
+            st.dataframe(
+                data_manager.get_dataframe(),
+                column_config={
+                    "data": st.column_config.DatetimeColumn("Data", format="DD/MM/YYYY HH:mm"),
+                    "valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                }
+            )
+            
+        with tab3:
+            st.subheader("Análise de IA")
+            if st.button("🔄 Gerar Nova Análise"):
+                with st.spinner("Analisando seus dados..."):
+                    analise = ai_assistant.analisar_padroes(data_manager.get_dataframe())
+                    st.markdown(analise)
+    
+    else:
+        st.info("👋 Bem-vindo! Envie mensagens pelo WhatsApp para começar a registrar seus gastos.")
+        st.markdown("""
+        ### Como usar:
+        1. Envie mensagens descrevendo seus gastos
+        2. A IA interpretará e categorizará automaticamente
+        3. Peça relatórios digitando "relatorio"
+        
+        **Exemplos de mensagens:**
+        - "Gastei 50 reais no almoço hoje"
+        - "Paguei a conta de luz de 150 reais"
+        - "Comprei um livro por 45,90"
+        """)
+
 def start_flask():
     flask_app.run(host='0.0.0.0', port=5000)
 
 if __name__ == "__main__":
-    main()
     # Iniciar o servidor webhook em uma thread separada
     flask_thread = Thread(target=start_flask)
-    flask_thread.daemon = True  # Isso garante que a thread será encerrada quando o programa principal terminar
+    flask_thread.daemon = True
     flask_thread.start()
+    
+    # Iniciar a aplicação Streamlit
+    main()
