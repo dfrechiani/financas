@@ -658,6 +658,130 @@ Descrição: {resultado['descricao']}"""
         st.error(f"Erro no webhook: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+class UserManager:
+    def __init__(self):
+        if 'users' not in st.session_state:
+            st.session_state.users = {}
+
+    def get_user_state(self, phone_number: str) -> dict:
+        """Retorna o estado atual do usuário"""
+        if phone_number not in st.session_state.users:
+            st.session_state.users[phone_number] = {
+                'status': 'new',  # new, pending_name, pending_email, active
+                'name': None,
+                'email': None,
+                'sheet_id': None
+            }
+        return st.session_state.users[phone_number]
+
+    def update_user_state(self, phone_number: str, updates: dict):
+        """Atualiza o estado do usuário"""
+        if phone_number in st.session_state.users:
+            st.session_state.users[phone_number].update(updates)
+
+    def handle_user_message(self, phone_number: str, message: str) -> str:
+        """Processa mensagem baseado no estado do usuário"""
+        user = self.get_user_state(phone_number)
+        
+        if user['status'] == 'new':
+            user['status'] = 'pending_name'
+            self.update_user_state(phone_number, user)
+            return """👋 Olá! Bem-vindo ao Assistente Financeiro!
+
+Para começar, preciso de algumas informações:
+
+Por favor, me diga seu nome completo:"""
+
+        elif user['status'] == 'pending_name':
+            user['name'] = message
+            user['status'] = 'pending_email'
+            self.update_user_state(phone_number, user)
+            return f"""Obrigado, {user['name']}! 
+
+Agora, por favor, me informe seu e-mail:"""
+
+        elif user['status'] == 'pending_email':
+            if '@' in message and '.' in message:  # Validação básica de email
+                user['email'] = message
+                user['status'] = 'active'
+                
+                # Criar planilha para o usuário
+                try:
+                    sheets_manager = SheetsManager()
+                    sheet_url = sheets_manager.create_new_sheet(user['name'])
+                    user['sheet_id'] = sheet_url
+                    self.update_user_state(phone_number, user)
+                    
+                    return f"""✨ Tudo pronto, {user['name']}!
+
+Sua planilha foi criada com sucesso! 
+Acesse aqui: {sheet_url}
+
+Para registrar gastos, você pode:
+1. Enviar mensagens como "Gastei 50 no almoço"
+2. Enviar fotos de comprovantes/notas
+3. Enviar extratos em CSV/PDF
+
+Para ver relatórios, digite "relatorio" a qualquer momento.
+
+Posso ajudar com mais alguma coisa?"""
+                except Exception as e:
+                    return "Desculpe, houve um erro ao criar sua planilha. Por favor, tente novamente mais tarde."
+            else:
+                return "Por favor, forneça um e-mail válido."
+
+        return "Como posso ajudar?"
+
+# Atualizar a rota do webhook para usar o UserManager
+@flask_app.route('/webhook', methods=['POST'])
+def webhook_post():
+    data = request.json
+    
+    try:
+        if 'messages' in data and data['messages']:
+            message = data['messages'][0]
+            numero = message['from']
+            texto = message['text']['body']
+            
+            # Inicializar gerenciadores
+            user_manager = UserManager()
+            
+            # Verificar estado do usuário e processar mensagem
+            if user_manager.get_user_state(numero)['status'] != 'active':
+                # Usuário ainda não completou o onboarding
+                resposta = user_manager.handle_user_message(numero, texto)
+                ConfigManager.send_whatsapp_message(numero, resposta)
+            else:
+                # Usuário já ativo, processar normalmente
+                data_manager = DataManager()
+                ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
+                
+                if texto.lower() == 'relatorio':
+                    relatorio, _ = ai_assistant.gerar_relatorio_mensal(
+                        data_manager.get_dataframe()
+                    )
+                    ConfigManager.send_whatsapp_message(numero, relatorio)
+                else:
+                    resultado = ai_assistant.processar_mensagem(texto)
+                    if resultado['sucesso']:
+                        if data_manager.adicionar_gasto(resultado):
+                            mensagem = f"""✅ Gasto registrado com sucesso!
+                            
+Categoria: {resultado['categoria']}
+Valor: R$ {resultado['valor']:.2f}
+Descrição: {resultado['descricao']}"""
+                        else:
+                            mensagem = "❌ Erro ao salvar o gasto."
+                    else:
+                        mensagem = resultado['mensagem']
+                    
+                    ConfigManager.send_whatsapp_message(numero, mensagem)
+        
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        st.error(f"Erro no webhook: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @flask_app.route('/webhook', methods=['GET'])
 def webhook_verify():
     try:
