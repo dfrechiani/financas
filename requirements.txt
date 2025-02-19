@@ -1,5 +1,6 @@
 streamlit>=1.32.0
 flask>=3.0.0
+flask-cors>=4.0.0
 pandas>=2.2.0
 plotly>=5.18.0
 openai>=1.12.0
