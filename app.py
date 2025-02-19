@@ -7,6 +7,7 @@ import io
 import asyncio
 from pathlib import Path
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from threading import Thread
 import requests
 from openai import OpenAI
@@ -24,6 +25,7 @@ st.set_page_config(
 
 # Inicialização do Flask
 flask_app = Flask(__name__)
+CORS(flask_app)
 
 # Definição das categorias estilo Cerbasi
 CATEGORIAS = {
