@@ -10,6 +10,9 @@ from flask import Flask, request, jsonify
 from threading import Thread
 import requests
 from openai import OpenAI
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import gspread
 
 # Configuração inicial do Streamlit
 st.set_page_config(
@@ -508,6 +511,87 @@ class WebhookTester:
             
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
+
+class SheetsManager:
+    def __init__(self):
+        self.credentials = Credentials.from_service_account_info(
+            st.secrets["google_credentials"],
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+        self.client = gspread.authorize(self.credentials)
+
+    def create_new_sheet(self, phone_number: str) -> str:
+        """Cria uma nova planilha para o usuário"""
+        try:
+            # Criar planilha
+            spreadsheet = self.client.create(f"Finanças - {phone_number}")
+            
+            # Configurar primeira aba
+            worksheet = spreadsheet.sheet1
+            worksheet.update_title("Registros")
+            
+            # Configurar cabeçalhos
+            headers = ["Data", "Categoria", "Subcategoria", "Valor", "Descrição"]
+            worksheet.update('A1:E1', [headers])
+            
+            # Formatar cabeçalhos
+            worksheet.format('A1:E1', {
+                "backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8},
+                "textFormat": {"bold": True}
+            })
+            
+            # Compartilhar planilha (opcional)
+            spreadsheet.share(None, perm_type='anyone', role='reader')
+            
+            return spreadsheet.url
+            
+        except Exception as e:
+            st.error(f"Erro ao criar planilha: {str(e)}")
+            return None
+
+    def save_transaction(self, sheet_id: str, transaction: dict):
+        """Salva uma nova transação na planilha"""
+        try:
+            sheet = self.client.open_by_key(sheet_id)
+            worksheet = sheet.sheet1
+            
+            # Preparar dados
+            row = [
+                transaction['data'].strftime("%Y-%m-%d %H:%M:%S"),
+                transaction['categoria'],
+                transaction.get('subcategoria', ''),
+                transaction['valor'],
+                transaction['descricao']
+            ]
+            
+            # Adicionar linha
+            worksheet.append_row(row)
+            
+        except Exception as e:
+            st.error(f"Erro ao salvar transação: {str(e)}")
+
+    def get_transactions(self, sheet_id: str) -> pd.DataFrame:
+        """Recupera todas as transações da planilha"""
+        try:
+            sheet = self.client.open_by_key(sheet_id)
+            worksheet = sheet.sheet1
+            
+            # Pegar todos os dados
+            data = worksheet.get_all_records()
+            
+            # Converter para DataFrame
+            df = pd.DataFrame(data)
+            if not df.empty:
+                df['Data'] = pd.to_datetime(df['Data'])
+            
+            return df
+            
+        except Exception as e:
+            st.error(f"Erro ao recuperar transações: {str(e)}")
+            return pd.DataFrame()
 
 # Rotas do Flask para webhook
 @flask_app.route('/webhook', methods=['POST'])
