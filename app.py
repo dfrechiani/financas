@@ -12,7 +12,6 @@ from threading import Thread
 import requests
 from openai import OpenAI
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 import gspread
 
 # Configuração inicial do Streamlit
@@ -142,68 +141,198 @@ class ConfigManager:
         openai_key = ConfigManager.get_secret("OPENAI_API_KEY")
         return OpenAI(api_key=openai_key) if openai_key else None
 
+class SheetsManager:
+    """Gerencia as operações com Google Sheets"""
+    def __init__(self):
+        self.credentials = Credentials.from_service_account_info(
+            st.secrets.secrets["google_credentials"],
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+        self.client = gspread.authorize(self.credentials)
+
+    def create_new_sheet(self, user_name: str) -> str:
+        """Cria uma nova planilha para o usuário"""
+        try:
+            # Criar planilha
+            spreadsheet = self.client.create(f"Finanças - {user_name}")
+            
+            # Configurar primeira aba
+            worksheet = spreadsheet.sheet1
+            worksheet.update_title("Registros")
+            
+            # Configurar cabeçalhos
+            headers = ["Data", "Categoria", "Subcategoria", "Valor", "Descrição"]
+            worksheet.update('A1:E1', [headers])
+            
+            # Formatar cabeçalhos
+            worksheet.format('A1:E1', {
+                "backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8},
+                "textFormat": {"bold": True}
+            })
+            
+            # Compartilhar planilha (opcional)
+            spreadsheet.share(None, perm_type='anyone', role='reader')
+            
+            return spreadsheet.url
+            
+        except Exception as e:
+            st.error(f"Erro ao criar planilha: {str(e)}")
+            return None
+
+    def save_transaction(self, sheet_id: str, transaction: dict):
+        """Salva uma nova transação na planilha"""
+        try:
+            sheet = self.client.open_by_key(sheet_id)
+            worksheet = sheet.sheet1
+            
+            # Preparar dados
+            row = [
+                transaction['data'].strftime("%Y-%m-%d %H:%M:%S"),
+                transaction['categoria'],
+                transaction.get('subcategoria', ''),
+                transaction['valor'],
+                transaction['descricao']
+            ]
+            
+            # Adicionar linha
+            worksheet.append_row(row)
+            
+        except Exception as e:
+            st.error(f"Erro ao salvar transação: {str(e)}")
+
+    def get_transactions(self, sheet_id: str) -> pd.DataFrame:
+        """Recupera todas as transações da planilha"""
+        try:
+            sheet = self.client.open_by_key(sheet_id)
+            worksheet = sheet.sheet1
+            
+            # Pegar todos os dados
+            data = worksheet.get_all_records()
+            
+            # Converter para DataFrame
+            df = pd.DataFrame(data)
+            if not df.empty:
+                df['Data'] = pd.to_datetime(df['Data'])
+            
+            return df
+            
+        except Exception as e:
+            st.error(f"Erro ao recuperar transações: {str(e)}")
+            return pd.DataFrame()
+
+class UserManager:
+    """Gerencia os usuários e seus estados"""
+    def __init__(self):
+        if 'users' not in st.session_state:
+            st.session_state.users = {}
+
+    def get_user_state(self, phone_number: str) -> dict:
+        """Retorna o estado atual do usuário"""
+        if phone_number not in st.session_state.users:
+            st.session_state.users[phone_number] = {
+                'status': 'new',  # new, pending_name, pending_email, active
+                'name': None,
+                'email': None,
+                'sheet_id': None
+            }
+        return st.session_state.users[phone_number]
+
+    def update_user_state(self, phone_number: str, updates: dict):
+        """Atualiza o estado do usuário"""
+        if phone_number in st.session_state.users:
+            st.session_state.users[phone_number].update(updates)
+
+    def handle_user_message(self, phone_number: str, message: str) -> str:
+        """Processa mensagem baseado no estado do usuário"""
+        user = self.get_user_state(phone_number)
+        
+        if user['status'] == 'new':
+            user['status'] = 'pending_name'
+            self.update_user_state(phone_number, user)
+            return """👋 Olá! Bem-vindo ao Assistente Financeiro!
+
+Para começar, preciso de algumas informações:
+
+Por favor, me diga seu nome completo:"""
+
+        elif user['status'] == 'pending_name':
+            user['name'] = message
+            user['status'] = 'pending_email'
+            self.update_user_state(phone_number, user)
+            return f"""Obrigado, {user['name']}! 
+
+Agora, por favor, me informe seu e-mail:"""
+
+        elif user['status'] == 'pending_email':
+            if '@' in message and '.' in message:  # Validação básica de email
+                user['email'] = message
+                user['status'] = 'active'
+                
+                # Criar planilha para o usuário
+                try:
+                    sheets_manager = SheetsManager()
+                    sheet_url = sheets_manager.create_new_sheet(user['name'])
+                    user['sheet_id'] = sheet_url
+                    self.update_user_state(phone_number, user)
+                    
+                    return f"""✨ Tudo pronto, {user['name']}!
+
+Sua planilha foi criada com sucesso! 
+Acesse aqui: {sheet_url}
+
+Para registrar gastos, você pode:
+1. Enviar mensagens como "Gastei 50 no almoço"
+2. Enviar fotos de comprovantes/notas
+3. Enviar extratos em CSV/PDF
+
+Para ver relatórios, digite "relatorio" a qualquer momento.
+
+Posso ajudar com mais alguma coisa?"""
+                except Exception as e:
+                    return "Desculpe, houve um erro ao criar sua planilha. Por favor, tente novamente mais tarde."
+            else:
+                return "Por favor, forneça um e-mail válido."
+
+        return "Como posso ajudar?"
+
 class DataManager:
     """Gerencia o armazenamento e manipulação dos dados"""
-    def __init__(self):
-        if 'df' not in st.session_state:
-            st.session_state.df = pd.DataFrame(
-                columns=['data', 'categoria', 'subcategoria', 'valor', 'descricao']
-            )
-    
+    def __init__(self, sheet_id: str = None):
+        self.sheet_id = sheet_id
+        self.sheets_manager = SheetsManager() if sheet_id else None
+
     def adicionar_gasto(self, gasto: dict) -> bool:
-        """Adiciona um novo gasto ao DataFrame"""
+        """Adiciona um novo gasto"""
         try:
-            novo_gasto = {
-                'data': datetime.now(),
-                'categoria': gasto['categoria'].lower(),
-                'subcategoria': gasto.get('subcategoria', '').lower(),
-                'valor': float(gasto['valor']),
-                'descricao': gasto['descricao']
-            }
-            
-            st.session_state.df = pd.concat(
-                [st.session_state.df, pd.DataFrame([novo_gasto])],
-                ignore_index=True
-            )
-            
-            self.salvar_dados()
+            if self.sheets_manager and self.sheet_id:
+                self.sheets_manager.save_transaction(self.sheet_id, gasto)
             return True
-            
         except Exception as e:
             st.error(f"Erro ao adicionar gasto: {str(e)}")
             return False
-    
+
     def get_dataframe(self) -> pd.DataFrame:
-        """Retorna o DataFrame atual"""
-        return st.session_state.df
-    
+        """Retorna o DataFrame com todos os gastos"""
+        try:
+            if self.sheets_manager and self.sheet_id:
+                return self.sheets_manager.get_transactions(self.sheet_id)
+            return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Erro ao recuperar dados: {str(e)}")
+            return pd.DataFrame()
+
     def has_data(self) -> bool:
         """Verifica se existem dados registrados"""
-        return not st.session_state.df.empty
-    
-    def salvar_dados(self):
-        """Salva os dados em CSV"""
-        try:
-            Path("data").mkdir(exist_ok=True)
-            st.session_state.df.to_csv("data/gastos.csv", index=False)
-        except Exception as e:
-            st.error(f"Erro ao salvar dados: {str(e)}")
-    
-    def carregar_dados(self):
-        """Carrega dados do CSV se existir"""
-        try:
-            if Path("data/gastos.csv").exists():
-                df = pd.read_csv("data/gastos.csv")
-                df['data'] = pd.to_datetime(df['data'])
-                st.session_state.df = df
-        except Exception as e:
-            st.error(f"Erro ao carregar dados: {str(e)}")
+        return not self.get_dataframe().empty
 
 class AIFinanceAssistant:
     """Assistente de IA para processamento de mensagens e análise financeira"""
     def __init__(self, openai_client):
         self.client = openai_client
-    
+
     def processar_mensagem(self, mensagem: str) -> dict:
         """Processa mensagem do usuário usando GPT-4"""
         if not self.client:
@@ -297,7 +426,10 @@ class AIFinanceAssistant:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Você é um especialista em análise de extratos bancários. Identifique as transações no CSV."
+                        "content": f"""Você é um especialista em análise de extratos bancários.
+                        Use estas categorias para classificar as transações:
+                        {json.dumps(CATEGORIAS, indent=2)}
+                        """
                     },
                     {
                         "role": "user",
@@ -354,97 +486,42 @@ class AIFinanceAssistant:
         except Exception as e:
             return f"Erro na análise: {str(e)}"
 
-class WhatsAppMessageHandler:
-    """Gerencia o processamento de diferentes tipos de mensagens do WhatsApp"""
-    def __init__(self, ai_assistant, data_manager):
-        self.ai_assistant = ai_assistant
-        self.data_manager = data_manager
+    def gerar_relatorio_mensal(self, df: pd.DataFrame):
+        """Gera relatório mensal com visualizações"""
+        if df.empty:
+            return "Nenhum gasto registrado ainda.", None
+        
+        mes_atual = datetime.now().month
+        df['data'] = pd.to_datetime(df['data'])
+        df_mes = df[df['data'].dt.month == mes_atual]
+        
+        if df_mes.empty:
+            return "Nenhum gasto registrado este mês.", None
+        
+        gastos_categoria = df_mes.groupby('categoria')['valor'].sum()
+        total_gasto = df_mes['valor'].sum()
+        media_diaria = total_gasto / df_mes['data'].dt.day.nunique()
+        
+        fig = px.pie(
+            values=gastos_categoria.values,
+            names=gastos_categoria.index,
+            title='Distribuição de Gastos por Categoria'
+        )
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        
+        relatorio = f"""### 📊 Resumo Financeiro do Mês
 
-    async def download_file(self, file_id):
-        """Download arquivo do WhatsApp usando a Media API"""
-        try:
-            token = ConfigManager.get_secret("WHATSAPP_TOKEN")
-            url = f"https://graph.facebook.com/v17.0/{file_id}"
-            
-            headers = {
-                "Authorization": f"Bearer {token}",
-            }
-            
-            # Obter URL do arquivo
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                file_data = response.json()
-                # Download do arquivo
-                file_response = requests.get(file_data['url'], headers=headers)
-                return file_response.content
-            return None
-        except Exception as e:
-            st.error(f"Erro ao baixar arquivo: {str(e)}")
-            return None
+💰 **Total Gasto:** R$ {total_gasto:.2f}
+📅 **Média Diária:** R$ {media_diaria:.2f}
 
-    async def process_image(self, image_id, number):
-        """Processa imagem usando OCR e GPT-4 Vision"""
-        try:
-            image_content = await self.download_file(image_id)
-            if not image_content:
-                return "Erro ao baixar imagem"
-
-            # Usar GPT-4 Vision para analisar a imagem
-            response = self.ai_assistant.analyze_image(image_content)
-            
-            # Processar os gastos identificados
-            gastos = response.get('gastos', [])
-            for gasto in gastos:
-                self.data_manager.adicionar_gasto(gasto)
-            
-            mensagem = f"✅ Identifiquei {len(gastos)} gastos na imagem:\n\n"
-            for gasto in gastos:
-                mensagem += f"- {gasto['descricao']}: R$ {gasto['valor']:.2f} ({gasto['categoria']})\n"
-            
-            ConfigManager.send_whatsapp_message(number, mensagem)
-            return "Imagem processada com sucesso"
-
-        except Exception as e:
-            return f"Erro ao processar imagem: {str(e)}"
-
-    async def process_document(self, doc_id, number):
-        """Processa documentos (CSV, PDF) do banco"""
-        try:
-            doc_content = await self.download_file(doc_id)
-            if not doc_content:
-                return "Erro ao baixar documento"
-
-            # Identificar tipo do arquivo
-            extension = self.get_file_extension(doc_id)
-            
-            if extension == 'csv':
-                # Processar CSV
-                df = pd.read_csv(io.StringIO(doc_content.decode('utf-8')))
-                gastos = self.ai_assistant.analyze_bank_csv(df)
-            elif extension == 'pdf':
-                # Processar PDF
-                gastos = self.ai_assistant.analyze_bank_pdf(doc_content)
-            else:
-                return "Formato de arquivo não suportado"
-
-            # Adicionar gastos identificados
-            for gasto in gastos:
-                self.data_manager.adicionar_gasto(gasto)
-            
-            mensagem = f"✅ Processado {len(gastos)} transações do arquivo:\n\n"
-            total = sum(gasto['valor'] for gasto in gastos)
-            mensagem += f"Total: R$ {total:.2f}\n\n"
-            mensagem += "Digite 'relatorio' para ver o resumo completo."
-            
-            ConfigManager.send_whatsapp_message(number, mensagem)
-            return "Documento processado com sucesso"
-
-        except Exception as e:
-            return f"Erro ao processar documento: {str(e)}"
-
-    def get_file_extension(self, filename):
-        """Obtém a extensão do arquivo"""
-        return filename.split('.')[-1].lower()
+#### Gastos por Categoria:
+"""
+        
+        for categoria, valor in gastos_categoria.items():
+            percentual = (valor / total_gasto) * 100
+            relatorio += f"- {categoria.title()}: R$ {valor:.2f} ({percentual:.1f}%)\n"
+        
+        return relatorio, fig
 
 class WebhookTester:
     """Testa a funcionalidade do webhook"""
@@ -514,107 +591,46 @@ class WebhookTester:
         except Exception as e:
             st.error(f"❌ Erro ao testar webhook: {str(e)}")
 
-class SheetsManager:
-    def __init__(self):
-        self.credentials = Credentials.from_service_account_info(
-            st.secrets["google_credentials"],
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"
-            ]
-        )
-        self.client = gspread.authorize(self.credentials)
-
-    def create_new_sheet(self, phone_number: str) -> str:
-        """Cria uma nova planilha para o usuário"""
+# Rota única para o webhook
+@flask_app.route('/webhook', methods=['GET', 'POST'])
+def webhook():
+    if request.method == 'GET':
         try:
-            # Criar planilha
-            spreadsheet = self.client.create(f"Finanças - {phone_number}")
-            
-            # Configurar primeira aba
-            worksheet = spreadsheet.sheet1
-            worksheet.update_title("Registros")
-            
-            # Configurar cabeçalhos
-            headers = ["Data", "Categoria", "Subcategoria", "Valor", "Descrição"]
-            worksheet.update('A1:E1', [headers])
-            
-            # Formatar cabeçalhos
-            worksheet.format('A1:E1', {
-                "backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8},
-                "textFormat": {"bold": True}
-            })
-            
-            # Compartilhar planilha (opcional)
-            spreadsheet.share(None, perm_type='anyone', role='reader')
-            
-            return spreadsheet.url
-            
-        except Exception as e:
-            st.error(f"Erro ao criar planilha: {str(e)}")
-            return None
+            verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
+            mode = request.args.get('hub.mode')
+            token = request.args.get('hub.verify_token')
+            challenge = request.args.get('hub.challenge')
 
-    def save_transaction(self, sheet_id: str, transaction: dict):
-        """Salva uma nova transação na planilha"""
+            if mode == 'subscribe' and token == verify_token:
+                if challenge:
+                    return str(challenge), 200
+                return "OK", 200
+            return "Unauthorized", 403
+        except Exception as e:
+            st.error(f"Erro na verificação: {str(e)}")
+            return str(e), 500
+            
+    elif request.method == 'POST':
+        data = request.json
         try:
-            sheet = self.client.open_by_key(sheet_id)
-            worksheet = sheet.sheet1
-            
-            # Preparar dados
-            row = [
-                transaction['data'].strftime("%Y-%m-%d %H:%M:%S"),
-                transaction['categoria'],
-                transaction.get('subcategoria', ''),
-                transaction['valor'],
-                transaction['descricao']
-            ]
-            
-            # Adicionar linha
-            worksheet.append_row(row)
-            
-        except Exception as e:
-            st.error(f"Erro ao salvar transação: {str(e)}")
-
-    def get_transactions(self, sheet_id: str) -> pd.DataFrame:
-        """Recupera todas as transações da planilha"""
-        try:
-            sheet = self.client.open_by_key(sheet_id)
-            worksheet = sheet.sheet1
-            
-            # Pegar todos os dados
-            data = worksheet.get_all_records()
-            
-            # Converter para DataFrame
-            df = pd.DataFrame(data)
-            if not df.empty:
-                df['Data'] = pd.to_datetime(df['Data'])
-            
-            return df
-            
-        except Exception as e:
-            st.error(f"Erro ao recuperar transações: {str(e)}")
-            return pd.DataFrame()
-
-# Rotas do Flask para webhook
-@flask_app.route('/webhook', methods=['POST'])
-def webhook_post():
-    data = request.json
-    
-    try:
-        if 'messages' in data and data['messages']:
-            message = data['messages'][0]
-            numero = message['from']
-            
-            # Inicializar handlers
-            data_manager = DataManager()
-            ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
-            message_handler = WhatsAppMessageHandler(ai_assistant, data_manager)
-            
-            # Verificar tipo de mensagem
-            if 'type' in message:
-                if message['type'] == 'text':
-                    # Processar mensagem de texto
-                    texto = message['text']['body']
+            if 'messages' in data and data['messages']:
+                message = data['messages'][0]
+                numero = message['from']
+                texto = message['text']['body']
+                
+                # Inicializar gerenciadores
+                user_manager = UserManager()
+                
+                # Verificar estado do usuário e processar mensagem
+                if user_manager.get_user_state(numero)['status'] != 'active':
+                    # Usuário ainda não completou o onboarding
+                    resposta = user_manager.handle_user_message(numero, texto)
+                    ConfigManager.send_whatsapp_message(numero, resposta)
+                else:
+                    # Usuário já ativo, processar normalmente
+                    user_data = user_manager.get_user_state(numero)
+                    data_manager = DataManager(user_data['sheet_id'])
+                    ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
                     
                     if texto.lower() == 'relatorio':
                         relatorio, _ = ai_assistant.gerar_relatorio_mensal(
@@ -636,199 +652,11 @@ Descrição: {resultado['descricao']}"""
                             mensagem = resultado['mensagem']
                         
                         ConfigManager.send_whatsapp_message(numero, mensagem)
-                
-                elif message['type'] == 'image':
-                    # Processar imagem
-                    image_id = message['image']['id']
-                    asyncio.run(message_handler.process_image(image_id, numero))
-                
-                elif message['type'] == 'document':
-                    # Processar documento
-                    doc_id = message['document']['id']
-                    asyncio.run(message_handler.process_document(doc_id, numero))
-                
-                else:
-                    ConfigManager.send_whatsapp_message(
-                        numero, 
-                        "❌ Tipo de mensagem não suportado. Envie texto, imagem ou documento (CSV/PDF)."
-                    )
-        
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        st.error(f"Erro no webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-class UserManager:
-    def __init__(self):
-        if 'users' not in st.session_state:
-            st.session_state.users = {}
-
-    def get_user_state(self, phone_number: str) -> dict:
-        """Retorna o estado atual do usuário"""
-        if phone_number not in st.session_state.users:
-            st.session_state.users[phone_number] = {
-                'status': 'new',  # new, pending_name, pending_email, active
-                'name': None,
-                'email': None,
-                'sheet_id': None
-            }
-        return st.session_state.users[phone_number]
-
-    def update_user_state(self, phone_number: str, updates: dict):
-        """Atualiza o estado do usuário"""
-        if phone_number in st.session_state.users:
-            st.session_state.users[phone_number].update(updates)
-
-    def handle_user_message(self, phone_number: str, message: str) -> str:
-        """Processa mensagem baseado no estado do usuário"""
-        user = self.get_user_state(phone_number)
-        
-        if user['status'] == 'new':
-            user['status'] = 'pending_name'
-            self.update_user_state(phone_number, user)
-            return """👋 Olá! Bem-vindo ao Assistente Financeiro!
-
-Para começar, preciso de algumas informações:
-
-Por favor, me diga seu nome completo:"""
-
-        elif user['status'] == 'pending_name':
-            user['name'] = message
-            user['status'] = 'pending_email'
-            self.update_user_state(phone_number, user)
-            return f"""Obrigado, {user['name']}! 
-
-Agora, por favor, me informe seu e-mail:"""
-
-        elif user['status'] == 'pending_email':
-            if '@' in message and '.' in message:  # Validação básica de email
-                user['email'] = message
-                user['status'] = 'active'
-                
-                # Criar planilha para o usuário
-                try:
-                    sheets_manager = SheetsManager()
-                    sheet_url = sheets_manager.create_new_sheet(user['name'])
-                    user['sheet_id'] = sheet_url
-                    self.update_user_state(phone_number, user)
-                    
-                    return f"""✨ Tudo pronto, {user['name']}!
-
-Sua planilha foi criada com sucesso! 
-Acesse aqui: {sheet_url}
-
-Para registrar gastos, você pode:
-1. Enviar mensagens como "Gastei 50 no almoço"
-2. Enviar fotos de comprovantes/notas
-3. Enviar extratos em CSV/PDF
-
-Para ver relatórios, digite "relatorio" a qualquer momento.
-
-Posso ajudar com mais alguma coisa?"""
-                except Exception as e:
-                    return "Desculpe, houve um erro ao criar sua planilha. Por favor, tente novamente mais tarde."
-            else:
-                return "Por favor, forneça um e-mail válido."
-
-        return "Como posso ajudar?"
-
-# Atualizar a rota do webhook para usar o UserManager
-@flask_app.route('/webhook', methods=['POST'])
-def webhook_post():
-    data = request.json
-    
-    try:
-        if 'messages' in data and data['messages']:
-            message = data['messages'][0]
-            numero = message['from']
-            texto = message['text']['body']
             
-            # Inicializar gerenciadores
-            user_manager = UserManager()
-            
-            # Verificar estado do usuário e processar mensagem
-            if user_manager.get_user_state(numero)['status'] != 'active':
-                # Usuário ainda não completou o onboarding
-                resposta = user_manager.handle_user_message(numero, texto)
-                ConfigManager.send_whatsapp_message(numero, resposta)
-            else:
-                # Usuário já ativo, processar normalmente
-                data_manager = DataManager()
-                ai_assistant = AIFinanceAssistant(ConfigManager.initialize_openai())
-                
-                if texto.lower() == 'relatorio':
-                    relatorio, _ = ai_assistant.gerar_relatorio_mensal(
-                        data_manager.get_dataframe()
-                    )
-                    ConfigManager.send_whatsapp_message(numero, relatorio)
-                else:
-                    resultado = ai_assistant.processar_mensagem(texto)
-                    if resultado['sucesso']:
-                        if data_manager.adicionar_gasto(resultado):
-                            mensagem = f"""✅ Gasto registrado com sucesso!
-                            
-Categoria: {resultado['categoria']}
-Valor: R$ {resultado['valor']:.2f}
-Descrição: {resultado['descricao']}"""
-                        else:
-                            mensagem = "❌ Erro ao salvar o gasto."
-                    else:
-                        mensagem = resultado['mensagem']
-                    
-                    ConfigManager.send_whatsapp_message(numero, mensagem)
-        
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        st.error(f"Erro no webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@flask_app.route('/webhook', methods=['GET'])
-def webhook_verify():
-    try:
-        verify_token = ConfigManager.get_secret("VERIFY_TOKEN")
-        mode = request.args.get('hub.mode')
-        token = request.args.get('hub.verify_token')
-        challenge = request.args.get('hub.challenge')
-
-        if mode and token:
-            if mode == 'subscribe' and token == verify_token:
-                return challenge, 200
-            else:
-                return jsonify({"status": "error", "message": "Token inválido"}), 403
-        return jsonify({"status": "error", "message": "Parâmetros inválidos"}), 400
-        
-    except Exception as e:
-        st.error(f"Erro na verificação: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-def render_sidebar(webhook_tester):
-    """Renderiza a barra lateral"""
-    with st.sidebar:
-        st.title("⚙️ Configurações")
-        
-        # Status das APIs
-        st.subheader("Status das APIs")
-        openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
-        whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
-        
-        st.write(f"OpenAI API: {openai_status}")
-        st.write(f"WhatsApp API: {whatsapp_status}")
-        
-        # Instruções de uso
-        st.subheader("📱 Como Usar")
-        st.markdown("""
-        1. Envie mensagens para o WhatsApp:
-           - Texto descrevendo gastos
-           - Imagens de comprovantes
-           - Arquivos CSV/PDF do banco
-        
-        2. Comandos disponíveis:
-           - 'relatorio': ver resumo mensal
-           - 'analise': ver análise detalhada
-        """)
-        
-        # Teste do Webhook
-        webhook_tester.render_test_interface()
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            st.error(f"Erro no webhook: {str(e)}")
+            return jsonify({"status": "error", "message": str(e)}), 500
 
 def render_dashboard(data_manager, ai_assistant):
     """Renderiza o dashboard principal"""
@@ -842,7 +670,7 @@ def render_dashboard(data_manager, ai_assistant):
                 st.plotly_chart(fig, use_container_width=True)
             st.markdown(relatorio)
             
-            # Adicionar gráficos extras
+            # Gráficos extras
             df = data_manager.get_dataframe()
             
             # Gráfico de gastos por subcategoria
@@ -874,7 +702,7 @@ def render_dashboard(data_manager, ai_assistant):
                 hide_index=True
             )
             
-            # Opção para exportar dados
+            # Exportar dados
             if st.button("📥 Exportar Dados"):
                 df = data_manager.get_dataframe()
                 csv = df.to_csv(index=False)
@@ -922,17 +750,29 @@ def main():
     # Título principal
     st.title("💰 Assistente Financeiro Inteligente")
     
-    # Renderizar componentes
-    render_sidebar(webhook_tester)
+    # Renderizar sidebar
+    with st.sidebar:
+        st.title("⚙️ Configurações")
+        
+        # Status das APIs
+        st.subheader("Status das APIs")
+        openai_status = "✅ Conectado" if ConfigManager.get_secret("OPENAI_API_KEY") else "❌ Não configurado"
+        whatsapp_status = "✅ Conectado" if ConfigManager.get_secret("WHATSAPP_TOKEN") else "❌ Não configurado"
+        sheets_status = "✅ Conectado" if "google_credentials" in st.secrets.secrets else "❌ Não configurado"
+        
+        st.write(f"OpenAI API: {openai_status}")
+        st.write(f"WhatsApp API: {whatsapp_status}")
+        st.write(f"Google Sheets: {sheets_status}")
+        
+        # Teste do Webhook
+        webhook_tester.render_test_interface()
+    
+    # Renderizar dashboard
     render_dashboard(data_manager, ai_assistant)
-
-def start_flask():
-    """Inicia o servidor Flask"""
-    flask_app.run(host='0.0.0.0', port=5000)
 
 if __name__ == "__main__":
     # Iniciar o servidor webhook em uma thread separada
-    flask_thread = Thread(target=start_flask)
+    flask_thread = Thread(target=lambda: flask_app.run(host='0.0.0.0', port=5000))
     flask_thread.daemon = True
     flask_thread.start()
     
